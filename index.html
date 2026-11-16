@@ -1,0 +1,209 @@
+<!-- ... existing code ... -->
+        function updateMainUI() {
+            renderAnomalyBanner();
+
+            const overstays = parkings.filter(p => calculateDays(p.checkInDate) > (7 + Number(p.extendedDays || 0)));
+            document.getElementById('badge-overstay-top').innerText = overstays.length;
+            document.getElementById('nav-count-list').innerText = parkings.length;
+            document.getElementById('nav-count-overstay').innerText = overstays.length;
+            document.getElementById('nav-count-sticker').innerText = stickerRecords.length;
+            document.getElementById('nav-count-fees').innerText = feeRecords.length;
+
+            const listEl = document.getElementById('parking-list-container');
+            if (listEl) {
+                listEl.innerHTML = parkings.length
+                    ? parkings.map(buildParkingCardHtml).join('')
+                    : `<div class="bg-white rounded-2xl p-6 text-center text-gray-400 text-xs border border-gray-200">ยังไม่มีรายการรถจอดค้างคืนในขณะนี้</div>`;
+            }
+
+            const overEl = document.getElementById('overstay-list-container');
+            if (overEl) {
+                overEl.innerHTML = overstays.length
+                    ? overstays.map(buildParkingCardHtml).join('')
+                    : `<div class="bg-white rounded-2xl p-6 text-center text-gray-400 text-xs border border-gray-200">ไม่มีรถจอดเกิน 7 วัน</div>`;
+            }
+
+            renderAdvanceNotices();
+            if (typeof window.renderStickerList === 'function') window.renderStickerList();
+            if (typeof window.renderFeeTab === 'function') window.renderFeeTab();
+            renderUsersTable();
+            updateStickerDatalist();
+        }
+
+        window.checkoutCar = async function(id) {
+<!-- ... existing code ... -->
+        // ================= ระบบฐานข้อมูลสติกเกอร์ =================
+        window.setStickerFormStatus = function(status) {
+            document.getElementById('sticker-status-input').value = status;
+            const btnAct = document.getElementById('form-stk-status-active');
+            const btnCan = document.getElementById('form-stk-status-cancelled');
+            const cancelFields = document.getElementById('sticker-cancel-fields');
+            if (status === 'cancelled') {
+                if (btnCan) btnCan.className = 'flex-1 py-2 rounded-lg text-xs font-bold bg-red-600 text-white transition flex items-center justify-center gap-1';
+                if (btnAct) btnAct.className = 'flex-1 py-2 rounded-lg text-xs font-bold bg-white text-gray-600 border border-gray-200 transition flex items-center justify-center gap-1';
+                if (cancelFields) cancelFields.classList.remove('hidden');
+            } else {
+                if (btnAct) btnAct.className = 'flex-1 py-2 rounded-lg text-xs font-bold bg-emerald-600 text-white transition flex items-center justify-center gap-1';
+                if (btnCan) btnCan.className = 'flex-1 py-2 rounded-lg text-xs font-bold bg-white text-gray-600 border border-gray-200 transition flex items-center justify-center gap-1';
+                if (cancelFields) cancelFields.classList.add('hidden');
+            }
+        };
+
+        window.handleSaveSticker = function(e) {
+            e.preventDefault();
+            const stkNum = document.getElementById('sticker-number-input').value.trim();
+            const house = normalizeHouse(document.getElementById('sticker-house-select')?.value);
+            const userStatus = document.getElementById('sticker-user-status').value;
+            const plate = document.getElementById('sticker-plate-input').value.trim() || '-';
+            const receiver = document.getElementById('sticker-receiver-input').value.trim() || '-';
+            const receiveDate = document.getElementById('sticker-date-input').value || todayLocal();
+            const status = document.getElementById('sticker-status-input').value || 'active';
+            const cancelDate = document.getElementById('sticker-cancel-date-input')?.value || '';
+            const cancelNote = document.getElementById('sticker-cancel-note-input')?.value.trim() || '';
+
+            captureStateSnapshot('บันทึกสติกเกอร์', stkNum);
+
+            const existingIdx = stickerRecords.findIndex(s => s.stickerNumber.toLowerCase() === stkNum.toLowerCase());
+            const obj = {
+                id: existingIdx !== -1 ? stickerRecords[existingIdx].id : ('stk-' + Date.now()),
+                stickerNumber: stkNum,
+                houseNumber: house,
+                userStatus,
+                plate,
+                receiver,
+                receiveDate,
+                status,
+                cancelDate,
+                cancelNote
+            };
+
+            if (existingIdx !== -1) stickerRecords[existingIdx] = obj;
+            else stickerRecords.unshift(obj);
+
+            autoSaveData('saveSticker');
+            updateMainUI();
+            document.getElementById('sticker-number-input').value = '';
+            document.getElementById('sticker-plate-input').value = '';
+            window.showStickersForSelectedHouse(house);
+            showToast(`บันทึกสติกเกอร์ ${stkNum} เรียบร้อย`);
+        };
+
+        window.showStickersForSelectedHouse = function(houseVal) {
+            const box = document.getElementById('selected-house-stickers-box');
+            if (!box) return;
+            const normH = normalizeHouse(houseVal);
+            if (!normH || normH === '-') {
+                box.classList.add('hidden');
+                box.innerHTML = '';
+                return;
+            }
+
+            const matched = stickerRecords.filter(s => normalizeHouse(s.houseNumber) === normH);
+            box.classList.remove('hidden');
+
+            if (!matched.length) {
+                box.innerHTML = `
+                    <div class="flex items-center justify-between text-xs">
+                        <span class="font-bold text-indigo-900">🏠 บ้านเลขที่ ${esc(normH)}:</span>
+                        <span class="bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-full font-bold text-[11px]">✨ ยังไม่มีประวัติการรับสติกเกอร์ในระบบ</span>
+                    </div>
+                `;
+                return;
+            }
+
+            const activeCount = matched.filter(m => m.status !== 'cancelled').length;
+            const cancelledCount = matched.length - activeCount;
+
+            box.innerHTML = `
+                <div class="flex flex-wrap justify-between items-center gap-2 border-b border-indigo-200 pb-2">
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm font-extrabold text-indigo-950">🏠 สติกเกอร์ปัจจุบันของบ้านเลขที่ ${esc(normH)}</span>
+                        <span class="bg-emerald-600 text-white px-2 py-0.5 rounded-full text-[10px] font-bold">ใช้งานปกติ ${activeCount} ใบ</span>
+                        ${cancelledCount > 0 ? `<span class="bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-[10px] font-bold">ยกเลิกแล้ว ${cancelledCount} ใบ</span>` : ''}
+                    </div>
+                </div>
+                <div class="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+                    ${matched.map(s => {
+                        const isCancelled = s.status === 'cancelled';
+                        return `
+                            <div class="bg-white border ${isCancelled ? 'border-red-200 bg-red-50/40' : 'border-indigo-200'} rounded-xl p-2.5 flex flex-wrap justify-between items-center gap-2 text-xs">
+                                <div class="flex items-center gap-2 flex-wrap">
+                                    <span class="font-extrabold text-blue-900">🏷️ ${esc(s.stickerNumber)}</span>
+                                    <span class="text-gray-700 font-semibold">🚗 ทะเบียน: ${esc(s.plate || '-')}</span>
+                                    <span class="text-gray-500 text-[11px]">(${esc(s.userStatus || 'เจ้าของร่วม')} • รับเมื่อ ${formatDateThai(s.receiveDate)})</span>
+                                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isCancelled ? 'bg-red-600 text-white' : 'bg-emerald-100 text-emerald-800'}">
+                                        ${isCancelled ? `🚫 ยกเลิกแล้ว` : '✅ ใช้งานอยู่'}
+                                    </span>
+                                </div>
+                                <div class="flex items-center gap-1.5">
+                                    <button type="button" onclick="window.loadStickerToForm('${s.id}')" class="bg-indigo-100 hover:bg-indigo-200 text-indigo-900 font-bold px-2.5 py-1 rounded-lg text-[11px]">✏️ แก้ไข</button>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        };
+
+        window.loadStickerToForm = function(stickerId) {
+            const s = stickerRecords.find(item => item.id === stickerId);
+            if (!s) return;
+            document.getElementById('sticker-number-input').value = s.stickerNumber || '';
+            const sel = document.getElementById('sticker-house-select');
+            if (sel) sel.value = normalizeHouse(s.houseNumber);
+            document.getElementById('sticker-user-status').value = s.userStatus || 'เจ้าของร่วม';
+            document.getElementById('sticker-plate-input').value = s.plate !== '-' ? (s.plate || '') : '';
+            document.getElementById('sticker-receiver-input').value = s.receiver !== '-' ? (s.receiver || '') : '';
+            document.getElementById('sticker-date-input').value = s.receiveDate || todayLocal();
+            window.setStickerFormStatus(s.status || 'active');
+            showToast(`ดึงข้อมูลสติกเกอร์ ${s.stickerNumber} มาที่ฟอร์มแล้ว`);
+        };
+
+        window.renderStickerList = function() {
+            const container = document.getElementById('sticker-list-container');
+            if (!container) return;
+            const q = (document.getElementById('sticker-search-input')?.value || '').trim().toLowerCase();
+            const filtered = stickerRecords.filter(s =>
+                !q ||
+                String(s.stickerNumber).toLowerCase().includes(q) ||
+                String(s.houseNumber).toLowerCase().includes(q) ||
+                String(s.plate).toLowerCase().includes(q)
+            );
+
+            if (!filtered.length) {
+                container.innerHTML = `<div class="text-center text-gray-400 text-xs py-6">ไม่พบข้อมูลสติกเกอร์</div>`;
+                return;
+            }
+
+            container.innerHTML = filtered.slice(0, 200).map(s => {
+                const isCancelled = s.status === 'cancelled';
+                return `
+                    <div class="p-3 rounded-xl border ${isCancelled ? 'bg-red-50/60 border-red-200' : 'bg-gray-50 border-gray-200'} flex flex-wrap justify-between items-center gap-2 text-xs">
+                        <div class="space-y-0.5">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <span class="font-extrabold text-blue-900">🏷️ ${esc(s.stickerNumber)}</span>
+                                <span class="bg-white border px-2 py-0.5 rounded font-bold">🏠 ${esc(s.houseNumber)}</span>
+                                <span class="text-gray-700 font-semibold">🚗 ${esc(s.plate)}</span>
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isCancelled ? 'bg-red-600 text-white' : 'bg-emerald-100 text-emerald-800'}">
+                                    ${isCancelled ? '🚫 ยกเลิกแล้ว' : '✅ ใช้งานปกติ'}
+                                </span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-1.5">
+                            <button type="button" onclick="window.loadStickerToForm('${s.id}')" class="bg-indigo-100 hover:bg-indigo-200 text-indigo-900 font-bold px-2.5 py-1 rounded-lg text-[11px]">✏️ แก้ไข</button>
+                            <button type="button" onclick="window.deleteSticker('${s.id}')" class="bg-red-100 hover:bg-red-200 text-red-700 font-bold px-2.5 py-1 rounded-lg text-[11px]">🗑️ ลบ</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        };
+
+        window.deleteSticker = function(id) {
+            stickerRecords = stickerRecords.filter(s => s.id !== id);
+            autoSaveData('deleteSticker');
+            updateMainUI();
+            showToast('ลบสติกเกอร์เรียบร้อย');
+        };
+
+        // ================= ระบบค่าส่วนกลาง (Fee Management - Fixed & Fully Working) =================
+<!-- ... existing code ... -->
