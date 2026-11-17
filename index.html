@@ -4233,6 +4233,21 @@
             const cancelDate = document.getElementById('sticker-cancel-date-input').value || '';
             const cancelNote = document.getElementById('sticker-cancel-note-input').value.trim() || '';
 
+            if (status === 'active' && house && house !== '-') {
+                const existingActiveSticker = stickerRecords.find(s => 
+                    normalizeHouse(s.houseNumber) === house && 
+                    s.status !== 'cancelled' && 
+                    s.stickerNumber.toLowerCase() !== stkNum.toLowerCase()
+                );
+                if (existingActiveSticker) {
+                    return window.customDialog({
+                        type: 'alert',
+                        title: '❌ ไม่สามารถออกสติกเกอร์เพิ่มได้',
+                        message: `บ้านเลขที่ ${house} มีสติกเกอร์ใช้งานอยู่แล้วในระบบ (เลขสติกเกอร์: ${existingActiveSticker.stickerNumber})\n\nจำกัดให้ 1 บ้านเลขที่ใช้งานสติกเกอร์ได้เพียง 1 ใบเท่านั้น หากต้องการเปลี่ยนคันใหม่ กรุณายกเลิกสติกเกอร์เดิมก่อน`
+                    });
+                }
+            }
+
             captureStateSnapshot('บันทึกสติกเกอร์', stkNum);
 
             const existingIdx = stickerRecords.findIndex(s => s.stickerNumber.toLowerCase() === stkNum.toLowerCase());
