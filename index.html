@@ -4,11 +4,1071 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ระบบบันทึกรถจอดค้างคืน - APW.Gasie (V3.9.13)</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.tailwindcss.com">
+        // ================= ระบบฐานข้อมูล QR Code Mapping =================
+        let qrDatabase = []; // เก็บรายการ [{ id, qrKey, houseNumber, note, updatedAt }]
+
+        // ฟังก์ชันแปลง QR Code เป็นบ้านเลขที่ (อัปเดตให้ค้นหาจาก qrDatabase ด้วย)
+        window.resolveQrToHouseNumber = function(scannedText) {
+            const raw = String(scannedText || '').trim();
+            if (!raw) return '';
+
+            // 1. ค้นหาในตารางฐานข้อมูล QR Code Mapping โดยตรง
+            const foundQr = qrDatabase.find(q => String(q.qrKey || '').trim().toLowerCase() === raw.toLowerCase());
+            if (foundQr && foundQr.houseNumber && foundQr.houseNumber !== '-') {
+                return normalizeHouse(foundQr.houseNumber);
+            }
+
+            // 2. ตรวจสอบว่าตรงกับรูปแบบบ้านเลขที่มาตรฐานในระบบหรือไม่
+            const norm = normalizeHouse(raw);
+            if (allHouseOptions.includes(norm)) {
+                return norm;
+            }
+
+            // 3. ค้นหาจากฐานข้อมูลสติกเกอร์
+            const foundSticker = stickerRecords.find(s => 
+                String(s.stickerNumber || '').trim().toLowerCase() === raw.toLowerCase() ||
+                String(s.plate || '').trim().toLowerCase() === raw.toLowerCase()
+            );
+            if (foundSticker && foundSticker.houseNumber && foundSticker.houseNumber !== '-') {
+                return normalizeHouse(foundSticker.houseNumber);
+            }
+
+            // 4. รองรับ URL หรือ JSON
+            try {
+                if (raw.startsWith('http://') || raw.startsWith('https://')) {
+                    const url = new URL(raw);
+                    const houseParam = url.searchParams.get('house') || url.searchParams.get('room') || url.searchParams.get('h');
+                    if (houseParam) return normalizeHouse(houseParam);
+                } else if (raw.startsWith('{') && raw.endsWith('}')) {
+                    const jsonObj = JSON.parse(raw);
+                    const val = jsonObj.house || jsonObj.room || jsonObj.houseNumber;
+                    if (val) return normalizeHouse(val);
+                }
+            } catch (e) {}
+
+            return raw;
+        };
+
+        window.handleSaveSingleQr = function(e) {
+            e.preventDefault();
+            const editId = document.getElementById('qr-edit-id').value;
+            const qrKey = document.getElementById('qr-input-key').value.trim();
+            const house = normalizeHouse(document.getElementById('qr-input-house').value);
+            const note = document.getElementById('qr-input-note').value.trim() || '';
+
+            if (!qrKey || !house || house === '-') {
+                return window.customDialog({ type: 'alert', title: 'ข้อมูลไม่ครบ', message: 'กรุณากรอกรหัส QR Code และบ้านเลขที่ให้ถูกต้อง' });
+            }
+
+            captureStateSnapshot('บันทึกข้อมูล QR Code Mapping', qrKey);
+
+            const existingIdx = editId
+                ? qrDatabase.findIndex(q => q.id === editId)
+                : qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+
+            const record = {
+                id: existingIdx !== -1 ? qrDatabase[existingIdx].id : ('qr-' + Date.now()),
+                qrKey,
+                houseNumber: house,
+                note,
+                updatedAt: new Date().toISOString()
+            };
+
+            if (existingIdx !== -1) {
+                qrDatabase[existingIdx] = record;
+            } else {
+                qrDatabase.unshift(record);
+            }
+
+            window.resetQrForm();
+            autoSaveData('saveQrRecord');
+            window.renderQrList();
+            showToast(`บันทึก QR Code "${qrKey}" เรียบร้อย!`);
+        };
+
+        window.editQrRecord = function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            document.getElementById('qr-edit-id').value = q.id;
+            document.getElementById('qr-input-key').value = q.qrKey || '';
+            document.getElementById('qr-input-house').value = q.houseNumber || '';
+            document.getElementById('qr-input-note').value = q.note || '';
+            document.getElementById('qr-form-title').innerHTML = `<span>✏️</span> แก้ไขข้อมูล QR Code: ${esc(q.qrKey)}`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> อัปเดตข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.remove('hidden');
+            document.getElementById('qr-input-key').focus();
+        };
+
+        window.resetQrForm = function() {
+            document.getElementById('qr-edit-id').value = '';
+            document.getElementById('qr-input-key').value = '';
+            document.getElementById('qr-input-house').value = '';
+            document.getElementById('qr-input-note').value = '';
+            document.getElementById('qr-form-title').innerHTML = `<span>➕</span> เพิ่ม / ผูกรหัส QR Code กับบ้านเลขที่`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> บันทึกข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.add('hidden');
+        };
+
+        window.deleteQrRecord = async function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: '🗑️ ยืนยันการลบข้อมูล QR',
+                message: `ต้องการลบการเชื่อมโยง QR Key "${q.qrKey}" ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ลบข้อมูล QR Code Mapping', q.qrKey);
+            qrDatabase = qrDatabase.filter(item => item.id !== id);
+            autoSaveData('deleteQrRecord');
+            window.renderQrList();
+            showToast('ลบรายการ QR เรียบร้อย');
+        };
+
+        window.clearAllQrData = async function() {
+            if (!qrDatabase.length) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: 'ล้างฐานข้อมูล QR Code ทั้งหมด',
+                message: `ต้องการลบข้อมูล QR Mapping ทั้งหมด (${qrDatabase.length} รายการ) ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ล้างข้อมูล QR ทั้งหมด', `${qrDatabase.length} รายการ`);
+            qrDatabase = [];
+            autoSaveData('clearQrData');
+            window.renderQrList();
+            showToast('ล้างข้อมูลฐานข้อมูล QR ทั้งหมดเรียบร้อย');
+        };
+
+        window.downloadQrTemplate = function() {
+            const csv = csvRow(['qrKey', 'houseNumber', 'note']) +
+                        csvRow(['QR-62-0001', '62/0001', 'ป้ายหน้าห้องชุด']) +
+                        csvRow(['QR-62-0002', '62/0002', 'สติกเกอร์จอดรถ']);
+            downloadCSV(csv, 'qr-mapping-template.csv');
+        };
+
+        window.exportQrCSV = function() {
+            if (!qrDatabase.length) {
+                return window.customDialog({ type: 'alert', title: 'ไม่มีข้อมูล', message: 'ยังไม่มีข้อมูลในฐานข้อมูล QR Code สำหรับ Export' });
+            }
+            let csv = csvRow(['รหัส QR Code / Key', 'บ้านเลขที่', 'หมายเหตุ', 'วันที่อัปเดต']);
+            qrDatabase.forEach(q => {
+                csv += csvRow([q.qrKey, q.houseNumber, q.note || '', q.updatedAt || '']);
+            });
+            downloadCSV(csv, `qr-database-${todayLocal()}.csv`);
+        };
+
+        window.importQrFile = function(e) {
+            const file = e.target.files?.[0];
+            if (!file) return;
+
+            const processQrRows = (rows) => {
+                let count = 0;
+                captureStateSnapshot('นำเข้าไฟล์ฐานข้อมูล QR Code', `${rows.length} รายการ`);
+                rows.forEach(r => {
+                    if (!r || typeof r !== 'object') return;
+                    const keyRaw = r.qrKey ?? r.key ?? r['รหัส QR'] ?? r['รหัส QR Code'] ?? Object.values(r)[0];
+                    const qrKey = String(keyRaw || '').trim();
+                    if (!qrKey || qrKey === 'qrKey' || qrKey.toLowerCase() === 'qrcode') return;
+
+                    const houseRaw = r.houseNumber ?? r['บ้านเลขที่'] ?? r['ห้อง'] ?? Object.values(r)[1];
+                    const house = normalizeHouse(houseRaw);
+                    const note = String(r.note ?? r['หมายเหตุ'] ?? '').trim();
+
+                    const idx = qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+                    const obj = {
+                        id: idx !== -1 ? qrDatabase[idx].id : ('qr-' + Date.now() + '-' + count),
+                        qrKey,
+                        houseNumber: house,
+                        note,
+                        updatedAt: new Date().toISOString()
+                    };
+
+                    if (idx !== -1) qrDatabase[idx] = obj;
+                    else qrDatabase.unshift(obj);
+                    count++;
+                });
+
+                autoSaveData('importQrDatabase');
+                window.renderQrList();
+                showToast(`นำเข้าฐานข้อมูล QR Code สำเร็จ ${count} รายการ!`);
+            };
+
+            const fileName = (file.name || '').toLowerCase();
+            const reader = new FileReader();
+
+            if (fileName.endsWith('.json')) {
+                reader.onload = function(evt) {
+                    try {
+                        const parsed = JSON.parse(evt.target.result);
+                        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.qrDatabase) ? parsed.qrDatabase : []);
+                        processQrRows(list);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ JSON ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsText(file, 'utf-8');
+            } else {
+                reader.onload = function(evt) {
+                    try {
+                        if (typeof XLSX === 'undefined') throw new Error('XLSX missing');
+                        const data = new Uint8Array(evt.target.result);
+                        const wb = XLSX.read(data, { type: 'array' });
+                        const ws = wb.Sheets[wb.SheetNames[0]];
+                        const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+                        processQrRows(rows);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ Excel/CSV ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        };
+
+        window.renderQrList = function() {
+            const listEl = document.getElementById('qr-list-container');
+            const infoEl = document.getElementById('qr-list-info');
+            const countBadge = document.getElementById('nav-count-qr-db');
+            if (countBadge) countBadge.innerText = qrDatabase.length;
+            if (!listEl || !infoEl) return;
+
+            if (!qrDatabase.length) {
+                infoEl.innerText = 'แสดง 0 รายการ';
+                listEl.innerHTML = `<div class="text-center text-gray-400 text-xs py-6">ยังไม่มีข้อมูลในฐานข้อมูล QR Code</div>`;
+                return;
+            }
+
+            const q = (document.getElementById('qr-search')?.value || '').trim().toLowerCase();
+            const filtered = qrDatabase.filter(item =>
+                !q ||
+                String(item.qrKey).toLowerCase().includes(q) ||
+                String(item.houseNumber).toLowerCase().includes(q) ||
+                String(item.note || '').toLowerCase().includes(q)
+            );
+
+            infoEl.innerText = `แสดง ${filtered.length} รายการ`;
+            listEl.innerHTML = filtered.map(item => `
+                <div class="p-3 bg-teal-50/50 border border-teal-200 rounded-xl flex flex-wrap justify-between items-center gap-2 text-xs hover:bg-teal-50 transition">
+                    <div class="space-y-0.5">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="font-extrabold text-teal-950 text-sm">🔲 ${esc(item.qrKey)}</span>
+                            <span class="bg-teal-200/80 text-teal-900 px-2 py-0.5 rounded-full font-bold text-[11px]">🏠 ${esc(item.houseNumber)}</span>
+                            ${item.note ? `<span class="text-gray-600 text-[11px]">• ${esc(item.note)}</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <button type="button" onclick="window.editQrRecord('${item.id}')" class="bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">✏️ แก้ไข</button>
+                        <button type="button" onclick="window.deleteQrRecord('${item.id}')" class="bg-red-100 hover:bg-red-200 text-red-700 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">🗑️ ลบ</button>
+                    </div>
+                </div>
+            `).join('');
+        };
+
+    </script>
     <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript">
+        // ================= ระบบฐานข้อมูล QR Code Mapping =================
+        let qrDatabase = []; // เก็บรายการ [{ id, qrKey, houseNumber, note, updatedAt }]
+
+        // ฟังก์ชันแปลง QR Code เป็นบ้านเลขที่ (อัปเดตให้ค้นหาจาก qrDatabase ด้วย)
+        window.resolveQrToHouseNumber = function(scannedText) {
+            const raw = String(scannedText || '').trim();
+            if (!raw) return '';
+
+            // 1. ค้นหาในตารางฐานข้อมูล QR Code Mapping โดยตรง
+            const foundQr = qrDatabase.find(q => String(q.qrKey || '').trim().toLowerCase() === raw.toLowerCase());
+            if (foundQr && foundQr.houseNumber && foundQr.houseNumber !== '-') {
+                return normalizeHouse(foundQr.houseNumber);
+            }
+
+            // 2. ตรวจสอบว่าตรงกับรูปแบบบ้านเลขที่มาตรฐานในระบบหรือไม่
+            const norm = normalizeHouse(raw);
+            if (allHouseOptions.includes(norm)) {
+                return norm;
+            }
+
+            // 3. ค้นหาจากฐานข้อมูลสติกเกอร์
+            const foundSticker = stickerRecords.find(s => 
+                String(s.stickerNumber || '').trim().toLowerCase() === raw.toLowerCase() ||
+                String(s.plate || '').trim().toLowerCase() === raw.toLowerCase()
+            );
+            if (foundSticker && foundSticker.houseNumber && foundSticker.houseNumber !== '-') {
+                return normalizeHouse(foundSticker.houseNumber);
+            }
+
+            // 4. รองรับ URL หรือ JSON
+            try {
+                if (raw.startsWith('http://') || raw.startsWith('https://')) {
+                    const url = new URL(raw);
+                    const houseParam = url.searchParams.get('house') || url.searchParams.get('room') || url.searchParams.get('h');
+                    if (houseParam) return normalizeHouse(houseParam);
+                } else if (raw.startsWith('{') && raw.endsWith('}')) {
+                    const jsonObj = JSON.parse(raw);
+                    const val = jsonObj.house || jsonObj.room || jsonObj.houseNumber;
+                    if (val) return normalizeHouse(val);
+                }
+            } catch (e) {}
+
+            return raw;
+        };
+
+        window.handleSaveSingleQr = function(e) {
+            e.preventDefault();
+            const editId = document.getElementById('qr-edit-id').value;
+            const qrKey = document.getElementById('qr-input-key').value.trim();
+            const house = normalizeHouse(document.getElementById('qr-input-house').value);
+            const note = document.getElementById('qr-input-note').value.trim() || '';
+
+            if (!qrKey || !house || house === '-') {
+                return window.customDialog({ type: 'alert', title: 'ข้อมูลไม่ครบ', message: 'กรุณากรอกรหัส QR Code และบ้านเลขที่ให้ถูกต้อง' });
+            }
+
+            captureStateSnapshot('บันทึกข้อมูล QR Code Mapping', qrKey);
+
+            const existingIdx = editId
+                ? qrDatabase.findIndex(q => q.id === editId)
+                : qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+
+            const record = {
+                id: existingIdx !== -1 ? qrDatabase[existingIdx].id : ('qr-' + Date.now()),
+                qrKey,
+                houseNumber: house,
+                note,
+                updatedAt: new Date().toISOString()
+            };
+
+            if (existingIdx !== -1) {
+                qrDatabase[existingIdx] = record;
+            } else {
+                qrDatabase.unshift(record);
+            }
+
+            window.resetQrForm();
+            autoSaveData('saveQrRecord');
+            window.renderQrList();
+            showToast(`บันทึก QR Code "${qrKey}" เรียบร้อย!`);
+        };
+
+        window.editQrRecord = function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            document.getElementById('qr-edit-id').value = q.id;
+            document.getElementById('qr-input-key').value = q.qrKey || '';
+            document.getElementById('qr-input-house').value = q.houseNumber || '';
+            document.getElementById('qr-input-note').value = q.note || '';
+            document.getElementById('qr-form-title').innerHTML = `<span>✏️</span> แก้ไขข้อมูล QR Code: ${esc(q.qrKey)}`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> อัปเดตข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.remove('hidden');
+            document.getElementById('qr-input-key').focus();
+        };
+
+        window.resetQrForm = function() {
+            document.getElementById('qr-edit-id').value = '';
+            document.getElementById('qr-input-key').value = '';
+            document.getElementById('qr-input-house').value = '';
+            document.getElementById('qr-input-note').value = '';
+            document.getElementById('qr-form-title').innerHTML = `<span>➕</span> เพิ่ม / ผูกรหัส QR Code กับบ้านเลขที่`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> บันทึกข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.add('hidden');
+        };
+
+        window.deleteQrRecord = async function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: '🗑️ ยืนยันการลบข้อมูล QR',
+                message: `ต้องการลบการเชื่อมโยง QR Key "${q.qrKey}" ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ลบข้อมูล QR Code Mapping', q.qrKey);
+            qrDatabase = qrDatabase.filter(item => item.id !== id);
+            autoSaveData('deleteQrRecord');
+            window.renderQrList();
+            showToast('ลบรายการ QR เรียบร้อย');
+        };
+
+        window.clearAllQrData = async function() {
+            if (!qrDatabase.length) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: 'ล้างฐานข้อมูล QR Code ทั้งหมด',
+                message: `ต้องการลบข้อมูล QR Mapping ทั้งหมด (${qrDatabase.length} รายการ) ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ล้างข้อมูล QR ทั้งหมด', `${qrDatabase.length} รายการ`);
+            qrDatabase = [];
+            autoSaveData('clearQrData');
+            window.renderQrList();
+            showToast('ล้างข้อมูลฐานข้อมูล QR ทั้งหมดเรียบร้อย');
+        };
+
+        window.downloadQrTemplate = function() {
+            const csv = csvRow(['qrKey', 'houseNumber', 'note']) +
+                        csvRow(['QR-62-0001', '62/0001', 'ป้ายหน้าห้องชุด']) +
+                        csvRow(['QR-62-0002', '62/0002', 'สติกเกอร์จอดรถ']);
+            downloadCSV(csv, 'qr-mapping-template.csv');
+        };
+
+        window.exportQrCSV = function() {
+            if (!qrDatabase.length) {
+                return window.customDialog({ type: 'alert', title: 'ไม่มีข้อมูล', message: 'ยังไม่มีข้อมูลในฐานข้อมูล QR Code สำหรับ Export' });
+            }
+            let csv = csvRow(['รหัส QR Code / Key', 'บ้านเลขที่', 'หมายเหตุ', 'วันที่อัปเดต']);
+            qrDatabase.forEach(q => {
+                csv += csvRow([q.qrKey, q.houseNumber, q.note || '', q.updatedAt || '']);
+            });
+            downloadCSV(csv, `qr-database-${todayLocal()}.csv`);
+        };
+
+        window.importQrFile = function(e) {
+            const file = e.target.files?.[0];
+            if (!file) return;
+
+            const processQrRows = (rows) => {
+                let count = 0;
+                captureStateSnapshot('นำเข้าไฟล์ฐานข้อมูล QR Code', `${rows.length} รายการ`);
+                rows.forEach(r => {
+                    if (!r || typeof r !== 'object') return;
+                    const keyRaw = r.qrKey ?? r.key ?? r['รหัส QR'] ?? r['รหัส QR Code'] ?? Object.values(r)[0];
+                    const qrKey = String(keyRaw || '').trim();
+                    if (!qrKey || qrKey === 'qrKey' || qrKey.toLowerCase() === 'qrcode') return;
+
+                    const houseRaw = r.houseNumber ?? r['บ้านเลขที่'] ?? r['ห้อง'] ?? Object.values(r)[1];
+                    const house = normalizeHouse(houseRaw);
+                    const note = String(r.note ?? r['หมายเหตุ'] ?? '').trim();
+
+                    const idx = qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+                    const obj = {
+                        id: idx !== -1 ? qrDatabase[idx].id : ('qr-' + Date.now() + '-' + count),
+                        qrKey,
+                        houseNumber: house,
+                        note,
+                        updatedAt: new Date().toISOString()
+                    };
+
+                    if (idx !== -1) qrDatabase[idx] = obj;
+                    else qrDatabase.unshift(obj);
+                    count++;
+                });
+
+                autoSaveData('importQrDatabase');
+                window.renderQrList();
+                showToast(`นำเข้าฐานข้อมูล QR Code สำเร็จ ${count} รายการ!`);
+            };
+
+            const fileName = (file.name || '').toLowerCase();
+            const reader = new FileReader();
+
+            if (fileName.endsWith('.json')) {
+                reader.onload = function(evt) {
+                    try {
+                        const parsed = JSON.parse(evt.target.result);
+                        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.qrDatabase) ? parsed.qrDatabase : []);
+                        processQrRows(list);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ JSON ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsText(file, 'utf-8');
+            } else {
+                reader.onload = function(evt) {
+                    try {
+                        if (typeof XLSX === 'undefined') throw new Error('XLSX missing');
+                        const data = new Uint8Array(evt.target.result);
+                        const wb = XLSX.read(data, { type: 'array' });
+                        const ws = wb.Sheets[wb.SheetNames[0]];
+                        const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+                        processQrRows(rows);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ Excel/CSV ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        };
+
+        window.renderQrList = function() {
+            const listEl = document.getElementById('qr-list-container');
+            const infoEl = document.getElementById('qr-list-info');
+            const countBadge = document.getElementById('nav-count-qr-db');
+            if (countBadge) countBadge.innerText = qrDatabase.length;
+            if (!listEl || !infoEl) return;
+
+            if (!qrDatabase.length) {
+                infoEl.innerText = 'แสดง 0 รายการ';
+                listEl.innerHTML = `<div class="text-center text-gray-400 text-xs py-6">ยังไม่มีข้อมูลในฐานข้อมูล QR Code</div>`;
+                return;
+            }
+
+            const q = (document.getElementById('qr-search')?.value || '').trim().toLowerCase();
+            const filtered = qrDatabase.filter(item =>
+                !q ||
+                String(item.qrKey).toLowerCase().includes(q) ||
+                String(item.houseNumber).toLowerCase().includes(q) ||
+                String(item.note || '').toLowerCase().includes(q)
+            );
+
+            infoEl.innerText = `แสดง ${filtered.length} รายการ`;
+            listEl.innerHTML = filtered.map(item => `
+                <div class="p-3 bg-teal-50/50 border border-teal-200 rounded-xl flex flex-wrap justify-between items-center gap-2 text-xs hover:bg-teal-50 transition">
+                    <div class="space-y-0.5">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="font-extrabold text-teal-950 text-sm">🔲 ${esc(item.qrKey)}</span>
+                            <span class="bg-teal-200/80 text-teal-900 px-2 py-0.5 rounded-full font-bold text-[11px]">🏠 ${esc(item.houseNumber)}</span>
+                            ${item.note ? `<span class="text-gray-600 text-[11px]">• ${esc(item.note)}</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <button type="button" onclick="window.editQrRecord('${item.id}')" class="bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">✏️ แก้ไข</button>
+                        <button type="button" onclick="window.deleteQrRecord('${item.id}')" class="bg-red-100 hover:bg-red-200 text-red-700 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">🗑️ ลบ</button>
+                    </div>
+                </div>
+            `).join('');
+        };
+
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js">
+        // ================= ระบบฐานข้อมูล QR Code Mapping =================
+        let qrDatabase = []; // เก็บรายการ [{ id, qrKey, houseNumber, note, updatedAt }]
+
+        // ฟังก์ชันแปลง QR Code เป็นบ้านเลขที่ (อัปเดตให้ค้นหาจาก qrDatabase ด้วย)
+        window.resolveQrToHouseNumber = function(scannedText) {
+            const raw = String(scannedText || '').trim();
+            if (!raw) return '';
+
+            // 1. ค้นหาในตารางฐานข้อมูล QR Code Mapping โดยตรง
+            const foundQr = qrDatabase.find(q => String(q.qrKey || '').trim().toLowerCase() === raw.toLowerCase());
+            if (foundQr && foundQr.houseNumber && foundQr.houseNumber !== '-') {
+                return normalizeHouse(foundQr.houseNumber);
+            }
+
+            // 2. ตรวจสอบว่าตรงกับรูปแบบบ้านเลขที่มาตรฐานในระบบหรือไม่
+            const norm = normalizeHouse(raw);
+            if (allHouseOptions.includes(norm)) {
+                return norm;
+            }
+
+            // 3. ค้นหาจากฐานข้อมูลสติกเกอร์
+            const foundSticker = stickerRecords.find(s => 
+                String(s.stickerNumber || '').trim().toLowerCase() === raw.toLowerCase() ||
+                String(s.plate || '').trim().toLowerCase() === raw.toLowerCase()
+            );
+            if (foundSticker && foundSticker.houseNumber && foundSticker.houseNumber !== '-') {
+                return normalizeHouse(foundSticker.houseNumber);
+            }
+
+            // 4. รองรับ URL หรือ JSON
+            try {
+                if (raw.startsWith('http://') || raw.startsWith('https://')) {
+                    const url = new URL(raw);
+                    const houseParam = url.searchParams.get('house') || url.searchParams.get('room') || url.searchParams.get('h');
+                    if (houseParam) return normalizeHouse(houseParam);
+                } else if (raw.startsWith('{') && raw.endsWith('}')) {
+                    const jsonObj = JSON.parse(raw);
+                    const val = jsonObj.house || jsonObj.room || jsonObj.houseNumber;
+                    if (val) return normalizeHouse(val);
+                }
+            } catch (e) {}
+
+            return raw;
+        };
+
+        window.handleSaveSingleQr = function(e) {
+            e.preventDefault();
+            const editId = document.getElementById('qr-edit-id').value;
+            const qrKey = document.getElementById('qr-input-key').value.trim();
+            const house = normalizeHouse(document.getElementById('qr-input-house').value);
+            const note = document.getElementById('qr-input-note').value.trim() || '';
+
+            if (!qrKey || !house || house === '-') {
+                return window.customDialog({ type: 'alert', title: 'ข้อมูลไม่ครบ', message: 'กรุณากรอกรหัส QR Code และบ้านเลขที่ให้ถูกต้อง' });
+            }
+
+            captureStateSnapshot('บันทึกข้อมูล QR Code Mapping', qrKey);
+
+            const existingIdx = editId
+                ? qrDatabase.findIndex(q => q.id === editId)
+                : qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+
+            const record = {
+                id: existingIdx !== -1 ? qrDatabase[existingIdx].id : ('qr-' + Date.now()),
+                qrKey,
+                houseNumber: house,
+                note,
+                updatedAt: new Date().toISOString()
+            };
+
+            if (existingIdx !== -1) {
+                qrDatabase[existingIdx] = record;
+            } else {
+                qrDatabase.unshift(record);
+            }
+
+            window.resetQrForm();
+            autoSaveData('saveQrRecord');
+            window.renderQrList();
+            showToast(`บันทึก QR Code "${qrKey}" เรียบร้อย!`);
+        };
+
+        window.editQrRecord = function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            document.getElementById('qr-edit-id').value = q.id;
+            document.getElementById('qr-input-key').value = q.qrKey || '';
+            document.getElementById('qr-input-house').value = q.houseNumber || '';
+            document.getElementById('qr-input-note').value = q.note || '';
+            document.getElementById('qr-form-title').innerHTML = `<span>✏️</span> แก้ไขข้อมูล QR Code: ${esc(q.qrKey)}`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> อัปเดตข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.remove('hidden');
+            document.getElementById('qr-input-key').focus();
+        };
+
+        window.resetQrForm = function() {
+            document.getElementById('qr-edit-id').value = '';
+            document.getElementById('qr-input-key').value = '';
+            document.getElementById('qr-input-house').value = '';
+            document.getElementById('qr-input-note').value = '';
+            document.getElementById('qr-form-title').innerHTML = `<span>➕</span> เพิ่ม / ผูกรหัส QR Code กับบ้านเลขที่`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> บันทึกข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.add('hidden');
+        };
+
+        window.deleteQrRecord = async function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: '🗑️ ยืนยันการลบข้อมูล QR',
+                message: `ต้องการลบการเชื่อมโยง QR Key "${q.qrKey}" ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ลบข้อมูล QR Code Mapping', q.qrKey);
+            qrDatabase = qrDatabase.filter(item => item.id !== id);
+            autoSaveData('deleteQrRecord');
+            window.renderQrList();
+            showToast('ลบรายการ QR เรียบร้อย');
+        };
+
+        window.clearAllQrData = async function() {
+            if (!qrDatabase.length) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: 'ล้างฐานข้อมูล QR Code ทั้งหมด',
+                message: `ต้องการลบข้อมูล QR Mapping ทั้งหมด (${qrDatabase.length} รายการ) ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ล้างข้อมูล QR ทั้งหมด', `${qrDatabase.length} รายการ`);
+            qrDatabase = [];
+            autoSaveData('clearQrData');
+            window.renderQrList();
+            showToast('ล้างข้อมูลฐานข้อมูล QR ทั้งหมดเรียบร้อย');
+        };
+
+        window.downloadQrTemplate = function() {
+            const csv = csvRow(['qrKey', 'houseNumber', 'note']) +
+                        csvRow(['QR-62-0001', '62/0001', 'ป้ายหน้าห้องชุด']) +
+                        csvRow(['QR-62-0002', '62/0002', 'สติกเกอร์จอดรถ']);
+            downloadCSV(csv, 'qr-mapping-template.csv');
+        };
+
+        window.exportQrCSV = function() {
+            if (!qrDatabase.length) {
+                return window.customDialog({ type: 'alert', title: 'ไม่มีข้อมูล', message: 'ยังไม่มีข้อมูลในฐานข้อมูล QR Code สำหรับ Export' });
+            }
+            let csv = csvRow(['รหัส QR Code / Key', 'บ้านเลขที่', 'หมายเหตุ', 'วันที่อัปเดต']);
+            qrDatabase.forEach(q => {
+                csv += csvRow([q.qrKey, q.houseNumber, q.note || '', q.updatedAt || '']);
+            });
+            downloadCSV(csv, `qr-database-${todayLocal()}.csv`);
+        };
+
+        window.importQrFile = function(e) {
+            const file = e.target.files?.[0];
+            if (!file) return;
+
+            const processQrRows = (rows) => {
+                let count = 0;
+                captureStateSnapshot('นำเข้าไฟล์ฐานข้อมูล QR Code', `${rows.length} รายการ`);
+                rows.forEach(r => {
+                    if (!r || typeof r !== 'object') return;
+                    const keyRaw = r.qrKey ?? r.key ?? r['รหัส QR'] ?? r['รหัส QR Code'] ?? Object.values(r)[0];
+                    const qrKey = String(keyRaw || '').trim();
+                    if (!qrKey || qrKey === 'qrKey' || qrKey.toLowerCase() === 'qrcode') return;
+
+                    const houseRaw = r.houseNumber ?? r['บ้านเลขที่'] ?? r['ห้อง'] ?? Object.values(r)[1];
+                    const house = normalizeHouse(houseRaw);
+                    const note = String(r.note ?? r['หมายเหตุ'] ?? '').trim();
+
+                    const idx = qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+                    const obj = {
+                        id: idx !== -1 ? qrDatabase[idx].id : ('qr-' + Date.now() + '-' + count),
+                        qrKey,
+                        houseNumber: house,
+                        note,
+                        updatedAt: new Date().toISOString()
+                    };
+
+                    if (idx !== -1) qrDatabase[idx] = obj;
+                    else qrDatabase.unshift(obj);
+                    count++;
+                });
+
+                autoSaveData('importQrDatabase');
+                window.renderQrList();
+                showToast(`นำเข้าฐานข้อมูล QR Code สำเร็จ ${count} รายการ!`);
+            };
+
+            const fileName = (file.name || '').toLowerCase();
+            const reader = new FileReader();
+
+            if (fileName.endsWith('.json')) {
+                reader.onload = function(evt) {
+                    try {
+                        const parsed = JSON.parse(evt.target.result);
+                        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.qrDatabase) ? parsed.qrDatabase : []);
+                        processQrRows(list);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ JSON ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsText(file, 'utf-8');
+            } else {
+                reader.onload = function(evt) {
+                    try {
+                        if (typeof XLSX === 'undefined') throw new Error('XLSX missing');
+                        const data = new Uint8Array(evt.target.result);
+                        const wb = XLSX.read(data, { type: 'array' });
+                        const ws = wb.Sheets[wb.SheetNames[0]];
+                        const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+                        processQrRows(rows);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ Excel/CSV ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        };
+
+        window.renderQrList = function() {
+            const listEl = document.getElementById('qr-list-container');
+            const infoEl = document.getElementById('qr-list-info');
+            const countBadge = document.getElementById('nav-count-qr-db');
+            if (countBadge) countBadge.innerText = qrDatabase.length;
+            if (!listEl || !infoEl) return;
+
+            if (!qrDatabase.length) {
+                infoEl.innerText = 'แสดง 0 รายการ';
+                listEl.innerHTML = `<div class="text-center text-gray-400 text-xs py-6">ยังไม่มีข้อมูลในฐานข้อมูล QR Code</div>`;
+                return;
+            }
+
+            const q = (document.getElementById('qr-search')?.value || '').trim().toLowerCase();
+            const filtered = qrDatabase.filter(item =>
+                !q ||
+                String(item.qrKey).toLowerCase().includes(q) ||
+                String(item.houseNumber).toLowerCase().includes(q) ||
+                String(item.note || '').toLowerCase().includes(q)
+            );
+
+            infoEl.innerText = `แสดง ${filtered.length} รายการ`;
+            listEl.innerHTML = filtered.map(item => `
+                <div class="p-3 bg-teal-50/50 border border-teal-200 rounded-xl flex flex-wrap justify-between items-center gap-2 text-xs hover:bg-teal-50 transition">
+                    <div class="space-y-0.5">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="font-extrabold text-teal-950 text-sm">🔲 ${esc(item.qrKey)}</span>
+                            <span class="bg-teal-200/80 text-teal-900 px-2 py-0.5 rounded-full font-bold text-[11px]">🏠 ${esc(item.houseNumber)}</span>
+                            ${item.note ? `<span class="text-gray-600 text-[11px]">• ${esc(item.note)}</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <button type="button" onclick="window.editQrRecord('${item.id}')" class="bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">✏️ แก้ไข</button>
+                        <button type="button" onclick="window.deleteQrRecord('${item.id}')" class="bg-red-100 hover:bg-red-200 text-red-700 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">🗑️ ลบ</button>
+                    </div>
+                </div>
+            `).join('');
+        };
+
+    </script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js">
+        // ================= ระบบฐานข้อมูล QR Code Mapping =================
+        let qrDatabase = []; // เก็บรายการ [{ id, qrKey, houseNumber, note, updatedAt }]
+
+        // ฟังก์ชันแปลง QR Code เป็นบ้านเลขที่ (อัปเดตให้ค้นหาจาก qrDatabase ด้วย)
+        window.resolveQrToHouseNumber = function(scannedText) {
+            const raw = String(scannedText || '').trim();
+            if (!raw) return '';
+
+            // 1. ค้นหาในตารางฐานข้อมูล QR Code Mapping โดยตรง
+            const foundQr = qrDatabase.find(q => String(q.qrKey || '').trim().toLowerCase() === raw.toLowerCase());
+            if (foundQr && foundQr.houseNumber && foundQr.houseNumber !== '-') {
+                return normalizeHouse(foundQr.houseNumber);
+            }
+
+            // 2. ตรวจสอบว่าตรงกับรูปแบบบ้านเลขที่มาตรฐานในระบบหรือไม่
+            const norm = normalizeHouse(raw);
+            if (allHouseOptions.includes(norm)) {
+                return norm;
+            }
+
+            // 3. ค้นหาจากฐานข้อมูลสติกเกอร์
+            const foundSticker = stickerRecords.find(s => 
+                String(s.stickerNumber || '').trim().toLowerCase() === raw.toLowerCase() ||
+                String(s.plate || '').trim().toLowerCase() === raw.toLowerCase()
+            );
+            if (foundSticker && foundSticker.houseNumber && foundSticker.houseNumber !== '-') {
+                return normalizeHouse(foundSticker.houseNumber);
+            }
+
+            // 4. รองรับ URL หรือ JSON
+            try {
+                if (raw.startsWith('http://') || raw.startsWith('https://')) {
+                    const url = new URL(raw);
+                    const houseParam = url.searchParams.get('house') || url.searchParams.get('room') || url.searchParams.get('h');
+                    if (houseParam) return normalizeHouse(houseParam);
+                } else if (raw.startsWith('{') && raw.endsWith('}')) {
+                    const jsonObj = JSON.parse(raw);
+                    const val = jsonObj.house || jsonObj.room || jsonObj.houseNumber;
+                    if (val) return normalizeHouse(val);
+                }
+            } catch (e) {}
+
+            return raw;
+        };
+
+        window.handleSaveSingleQr = function(e) {
+            e.preventDefault();
+            const editId = document.getElementById('qr-edit-id').value;
+            const qrKey = document.getElementById('qr-input-key').value.trim();
+            const house = normalizeHouse(document.getElementById('qr-input-house').value);
+            const note = document.getElementById('qr-input-note').value.trim() || '';
+
+            if (!qrKey || !house || house === '-') {
+                return window.customDialog({ type: 'alert', title: 'ข้อมูลไม่ครบ', message: 'กรุณากรอกรหัส QR Code และบ้านเลขที่ให้ถูกต้อง' });
+            }
+
+            captureStateSnapshot('บันทึกข้อมูล QR Code Mapping', qrKey);
+
+            const existingIdx = editId
+                ? qrDatabase.findIndex(q => q.id === editId)
+                : qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+
+            const record = {
+                id: existingIdx !== -1 ? qrDatabase[existingIdx].id : ('qr-' + Date.now()),
+                qrKey,
+                houseNumber: house,
+                note,
+                updatedAt: new Date().toISOString()
+            };
+
+            if (existingIdx !== -1) {
+                qrDatabase[existingIdx] = record;
+            } else {
+                qrDatabase.unshift(record);
+            }
+
+            window.resetQrForm();
+            autoSaveData('saveQrRecord');
+            window.renderQrList();
+            showToast(`บันทึก QR Code "${qrKey}" เรียบร้อย!`);
+        };
+
+        window.editQrRecord = function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            document.getElementById('qr-edit-id').value = q.id;
+            document.getElementById('qr-input-key').value = q.qrKey || '';
+            document.getElementById('qr-input-house').value = q.houseNumber || '';
+            document.getElementById('qr-input-note').value = q.note || '';
+            document.getElementById('qr-form-title').innerHTML = `<span>✏️</span> แก้ไขข้อมูล QR Code: ${esc(q.qrKey)}`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> อัปเดตข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.remove('hidden');
+            document.getElementById('qr-input-key').focus();
+        };
+
+        window.resetQrForm = function() {
+            document.getElementById('qr-edit-id').value = '';
+            document.getElementById('qr-input-key').value = '';
+            document.getElementById('qr-input-house').value = '';
+            document.getElementById('qr-input-note').value = '';
+            document.getElementById('qr-form-title').innerHTML = `<span>➕</span> เพิ่ม / ผูกรหัส QR Code กับบ้านเลขที่`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> บันทึกข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.add('hidden');
+        };
+
+        window.deleteQrRecord = async function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: '🗑️ ยืนยันการลบข้อมูล QR',
+                message: `ต้องการลบการเชื่อมโยง QR Key "${q.qrKey}" ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ลบข้อมูล QR Code Mapping', q.qrKey);
+            qrDatabase = qrDatabase.filter(item => item.id !== id);
+            autoSaveData('deleteQrRecord');
+            window.renderQrList();
+            showToast('ลบรายการ QR เรียบร้อย');
+        };
+
+        window.clearAllQrData = async function() {
+            if (!qrDatabase.length) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: 'ล้างฐานข้อมูล QR Code ทั้งหมด',
+                message: `ต้องการลบข้อมูล QR Mapping ทั้งหมด (${qrDatabase.length} รายการ) ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ล้างข้อมูล QR ทั้งหมด', `${qrDatabase.length} รายการ`);
+            qrDatabase = [];
+            autoSaveData('clearQrData');
+            window.renderQrList();
+            showToast('ล้างข้อมูลฐานข้อมูล QR ทั้งหมดเรียบร้อย');
+        };
+
+        window.downloadQrTemplate = function() {
+            const csv = csvRow(['qrKey', 'houseNumber', 'note']) +
+                        csvRow(['QR-62-0001', '62/0001', 'ป้ายหน้าห้องชุด']) +
+                        csvRow(['QR-62-0002', '62/0002', 'สติกเกอร์จอดรถ']);
+            downloadCSV(csv, 'qr-mapping-template.csv');
+        };
+
+        window.exportQrCSV = function() {
+            if (!qrDatabase.length) {
+                return window.customDialog({ type: 'alert', title: 'ไม่มีข้อมูล', message: 'ยังไม่มีข้อมูลในฐานข้อมูล QR Code สำหรับ Export' });
+            }
+            let csv = csvRow(['รหัส QR Code / Key', 'บ้านเลขที่', 'หมายเหตุ', 'วันที่อัปเดต']);
+            qrDatabase.forEach(q => {
+                csv += csvRow([q.qrKey, q.houseNumber, q.note || '', q.updatedAt || '']);
+            });
+            downloadCSV(csv, `qr-database-${todayLocal()}.csv`);
+        };
+
+        window.importQrFile = function(e) {
+            const file = e.target.files?.[0];
+            if (!file) return;
+
+            const processQrRows = (rows) => {
+                let count = 0;
+                captureStateSnapshot('นำเข้าไฟล์ฐานข้อมูล QR Code', `${rows.length} รายการ`);
+                rows.forEach(r => {
+                    if (!r || typeof r !== 'object') return;
+                    const keyRaw = r.qrKey ?? r.key ?? r['รหัส QR'] ?? r['รหัส QR Code'] ?? Object.values(r)[0];
+                    const qrKey = String(keyRaw || '').trim();
+                    if (!qrKey || qrKey === 'qrKey' || qrKey.toLowerCase() === 'qrcode') return;
+
+                    const houseRaw = r.houseNumber ?? r['บ้านเลขที่'] ?? r['ห้อง'] ?? Object.values(r)[1];
+                    const house = normalizeHouse(houseRaw);
+                    const note = String(r.note ?? r['หมายเหตุ'] ?? '').trim();
+
+                    const idx = qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+                    const obj = {
+                        id: idx !== -1 ? qrDatabase[idx].id : ('qr-' + Date.now() + '-' + count),
+                        qrKey,
+                        houseNumber: house,
+                        note,
+                        updatedAt: new Date().toISOString()
+                    };
+
+                    if (idx !== -1) qrDatabase[idx] = obj;
+                    else qrDatabase.unshift(obj);
+                    count++;
+                });
+
+                autoSaveData('importQrDatabase');
+                window.renderQrList();
+                showToast(`นำเข้าฐานข้อมูล QR Code สำเร็จ ${count} รายการ!`);
+            };
+
+            const fileName = (file.name || '').toLowerCase();
+            const reader = new FileReader();
+
+            if (fileName.endsWith('.json')) {
+                reader.onload = function(evt) {
+                    try {
+                        const parsed = JSON.parse(evt.target.result);
+                        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.qrDatabase) ? parsed.qrDatabase : []);
+                        processQrRows(list);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ JSON ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsText(file, 'utf-8');
+            } else {
+                reader.onload = function(evt) {
+                    try {
+                        if (typeof XLSX === 'undefined') throw new Error('XLSX missing');
+                        const data = new Uint8Array(evt.target.result);
+                        const wb = XLSX.read(data, { type: 'array' });
+                        const ws = wb.Sheets[wb.SheetNames[0]];
+                        const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+                        processQrRows(rows);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ Excel/CSV ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        };
+
+        window.renderQrList = function() {
+            const listEl = document.getElementById('qr-list-container');
+            const infoEl = document.getElementById('qr-list-info');
+            const countBadge = document.getElementById('nav-count-qr-db');
+            if (countBadge) countBadge.innerText = qrDatabase.length;
+            if (!listEl || !infoEl) return;
+
+            if (!qrDatabase.length) {
+                infoEl.innerText = 'แสดง 0 รายการ';
+                listEl.innerHTML = `<div class="text-center text-gray-400 text-xs py-6">ยังไม่มีข้อมูลในฐานข้อมูล QR Code</div>`;
+                return;
+            }
+
+            const q = (document.getElementById('qr-search')?.value || '').trim().toLowerCase();
+            const filtered = qrDatabase.filter(item =>
+                !q ||
+                String(item.qrKey).toLowerCase().includes(q) ||
+                String(item.houseNumber).toLowerCase().includes(q) ||
+                String(item.note || '').toLowerCase().includes(q)
+            );
+
+            infoEl.innerText = `แสดง ${filtered.length} รายการ`;
+            listEl.innerHTML = filtered.map(item => `
+                <div class="p-3 bg-teal-50/50 border border-teal-200 rounded-xl flex flex-wrap justify-between items-center gap-2 text-xs hover:bg-teal-50 transition">
+                    <div class="space-y-0.5">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="font-extrabold text-teal-950 text-sm">🔲 ${esc(item.qrKey)}</span>
+                            <span class="bg-teal-200/80 text-teal-900 px-2 py-0.5 rounded-full font-bold text-[11px]">🏠 ${esc(item.houseNumber)}</span>
+                            ${item.note ? `<span class="text-gray-600 text-[11px]">• ${esc(item.note)}</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <button type="button" onclick="window.editQrRecord('${item.id}')" class="bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">✏️ แก้ไข</button>
+                        <button type="button" onclick="window.deleteQrRecord('${item.id}')" class="bg-red-100 hover:bg-red-200 text-red-700 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">🗑️ ลบ</button>
+                    </div>
+                </div>
+            `).join('');
+        };
+
+    </script>
     <style>
         body { font-family: 'Prompt', sans-serif; background-color: #f3f4f6; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
@@ -34,7 +1094,7 @@
                 <div>
                     <div class="flex items-center gap-2">
                         <h1 id="app-main-title" class="text-base sm:text-lg font-bold tracking-tight leading-tight">ระบบบันทึกรถจอดค้างคืน</h1>
-                        <span id="app-project-badge" class="bg-amber-400/20 text-amber-200 border border-amber-300/30 px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide">v3.9.13</span>
+                        <span id="app-project-badge" class="bg-amber-400/20 text-amber-200 border border-amber-300/30 px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide">v3.9.14</span>
                     </div>
                     <div class="flex items-center gap-1.5 mt-0.5">
                         <span id="status-dot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
@@ -156,6 +1216,15 @@
                         <span class="text-[10px] text-gray-500">15 รายการ</span>
                     </div>
                     <span>ค้นหาประวัติ</span>
+                </button>
+
+                
+                <button onclick="window.switchTab('qr-db'); window.closeBackendPopupMenu();" id="tab-btn-qr-db" class="backend-tab-btn p-3.5 rounded-2xl border text-left transition flex flex-col gap-1 bg-white text-gray-700 border-gray-200 hover:bg-teal-50">
+                    <div class="flex justify-between items-center w-full">
+                        <span class="text-lg">🔲</span>
+                        <span class="px-2 py-0.5 rounded-full text-[10px] bg-teal-100 text-teal-800 font-extrabold" id="nav-count-qr-db">0</span>
+                    </div>
+                    <span>ฐานข้อมูล QR Code</span>
                 </button>
 
                 <button onclick="window.switchTab('users'); window.closeBackendPopupMenu();" id="tab-btn-users" class="backend-tab-btn p-3.5 rounded-2xl border text-left transition flex flex-col gap-1 bg-white text-gray-700 border-gray-200 hover:bg-purple-50">
@@ -405,12 +1474,13 @@
                         <h2 class="text-sm font-bold text-indigo-900 flex items-center gap-1.5"><span>📥</span> นำเข้าฐานข้อมูลสติกเกอร์ (Excel / CSV)</h2>
                         <p class="text-xs text-gray-500">อัปโหลดไฟล์ฐานข้อมูลสติกเกอร์เพื่อสร้างระบบตรวจสอบอัตโนมัติ</p>
                     </div>
-                    <div class="flex gap-1.5">
+                    <div class="flex flex-wrap gap-1.5">
                         <label class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3.5 py-2 rounded-xl text-xs shadow-sm cursor-pointer transition">
                             📂 เลือกไฟล์สติกเกอร์
                             <input type="file" accept=".xlsx,.xls,.csv,.json" onchange="window.importStickerFile(event)" class="hidden">
                         </label>
                         <button type="button" onclick="window.downloadStickerTemplate()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold px-3 py-2 rounded-xl text-xs">📄 ตัวอย่าง Template</button>
+                        <button type="button" onclick="window.clearAllStickerData()" class="bg-red-50 hover:bg-red-100 text-red-600 font-semibold px-3 py-2 rounded-xl text-xs transition">🗑️ ลบทั้งหมด</button>
                     </div>
                 </div>
             </div>
@@ -784,6 +1854,67 @@
         </section>
 
         <!-- ================= TAB 8: จัดการสิทธิ์สมาชิก/ผู้ใช้งาน (แก้ไขบั๊กเพิ่มไม่ได้ & เปลี่ยนรหัสไม่จำ) ================= -->
+        
+        <!-- ================= TAB: ฐานข้อมูล QR Code (Template, Import, Export, Delete) ================= -->
+        <section id="view-qr-db" class="tab-content hidden space-y-4 animate-fade-in">
+            <div class="bg-white rounded-2xl shadow-sm border border-teal-200 p-4 sm:p-5 space-y-4">
+                <div class="flex flex-wrap justify-between items-center gap-2 border-b pb-3">
+                    <div>
+                        <h2 class="text-sm font-bold text-teal-900 flex items-center gap-1.5"><span>🔲</span> จัดการฐานข้อมูลแปลง QR Code เป็นบ้านเลขที่</h2>
+                        <p class="text-xs text-gray-500">นำเข้า, ส่งออก, ดาวน์โหลด Template, และจัดการข้อมูลรหัส QR Code กับบ้านเลขที่</p>
+                    </div>
+                    <div class="flex flex-wrap gap-1.5">
+                        <label class="bg-teal-600 hover:bg-teal-700 text-white font-bold px-3.5 py-2 rounded-xl text-xs shadow-sm cursor-pointer transition flex items-center gap-1">
+                            <span>📥</span> นำเข้า QR (Excel / CSV)
+                            <input type="file" accept=".xlsx,.xls,.csv,.json" onchange="window.importQrFile(event)" class="hidden">
+                        </label>
+                        <button type="button" onclick="window.downloadQrTemplate()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold px-3 py-2 rounded-xl text-xs">📄 ตัวอย่าง Template</button>
+                        <button type="button" onclick="window.exportQrCSV()" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-2 rounded-xl text-xs shadow-sm">📊 Export CSV</button>
+                        <button type="button" onclick="window.clearAllQrData()" class="bg-red-50 hover:bg-red-100 text-red-600 font-semibold px-3 py-2 rounded-xl text-xs">🗑️ ล้างทั้งหมด</button>
+                    </div>
+                </div>
+
+                <!-- ฟอร์มเพิ่ม / แก้ไขรายการ QR Mapping เดี่ยว -->
+                <form onsubmit="window.handleSaveSingleQr(event)" class="bg-teal-50/60 border border-teal-200 rounded-xl p-3.5 space-y-3 text-xs">
+                    <div class="flex justify-between items-center">
+                        <h3 id="qr-form-title" class="font-bold text-teal-900 flex items-center gap-1.5"><span>➕</span> เพิ่ม / ผูกรหัส QR Code กับบ้านเลขที่</h3>
+                        <button type="button" id="qr-cancel-edit-btn" onclick="window.resetQrForm()" class="hidden text-[11px] bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold px-2.5 py-1 rounded-lg transition">ยกเลิกการแก้ไข</button>
+                    </div>
+                    <input type="hidden" id="qr-edit-id" value="">
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <div>
+                            <label class="block text-[11px] font-semibold text-gray-700 mb-1">รหัส QR Code / Key <span class="text-red-500">*</span></label>
+                            <div class="flex gap-1">
+                                <input type="text" id="qr-input-key" required placeholder="เช่น QR-62-0001 หรือ URL" class="w-full p-2.5 bg-white border border-gray-300 rounded-xl font-bold text-teal-900 outline-none focus:ring-2 focus:ring-teal-500">
+                                <button type="button" onclick="window.startScan('qr-input-key')" class="bg-teal-700 text-white px-2.5 rounded-xl text-xs shrink-0">📷 สแกน</button>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-gray-700 mb-1">บ้านเลขที่ / ห้อง <span class="text-red-500">*</span></label>
+                            <input type="text" id="qr-input-house" list="house-Numbers-datalist" required placeholder="เช่น 62/0001" class="w-full p-2.5 bg-white border border-gray-300 rounded-xl font-bold text-gray-900 outline-none focus:ring-2 focus:ring-teal-500">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-gray-700 mb-1">หมายเหตุ / ชื่อผู้ถือครอง</label>
+                            <input type="text" id="qr-input-note" placeholder="เช่น ป้ายหน้าห้องชุด, สติกเกอร์หลัก" class="w-full p-2.5 bg-white border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-teal-500">
+                        </div>
+                    </div>
+                    <div class="flex justify-end pt-1">
+                        <button type="submit" id="qr-submit-btn" class="bg-teal-600 hover:bg-teal-700 text-white font-bold px-4 py-2 rounded-xl shadow-sm transition flex items-center gap-1.5">
+                            <span>💾</span> บันทึกข้อมูล QR Code
+                        </button>
+                    </div>
+                </form>
+
+                <div class="space-y-2 pt-2">
+                    <div class="flex flex-wrap gap-2 items-center">
+                        <input type="text" id="qr-search" oninput="window.renderQrList()" placeholder="🔍 ค้นหารหัส QR Code หรือบ้านเลขที่..." class="flex-1 min-w-[200px] p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-none focus:ring-2 focus:ring-teal-500">
+                        <span id="qr-list-info" class="text-[11px] text-gray-500">แสดง 0 รายการ</span>
+                    </div>
+                    <div id="qr-list-container" class="space-y-2 max-h-[55vh] overflow-y-auto pr-1"></div>
+                </div>
+            </div>
+        </section>
+
         <section id="view-users" class="tab-content hidden space-y-5 animate-fade-in">
             <!-- ฟอร์มเพิ่มผู้ใช้งาน/สมาชิกใหม่โดยตรง กดเพิ่มเข้าตารางทันทีไม่ค้าง -->
             <div class="bg-white p-5 rounded-2xl shadow-sm border border-purple-200 space-y-4">
@@ -1261,7 +2392,7 @@
     </div>
 
     <script>
-        const APP_VERSION = '3.9.13';
+        const APP_VERSION = '3.9.14';
         const IS_CLONED_APP = false; // จะถูกเปลี่ยนเป็น true อัตโนมัติในไฟล์สำเนาที่ดาวน์โหลดออกไป
         const EMBEDDED_INITIAL_LAYOUTS = null; // จะถูกฝังผังลานจอดที่เลือกเมื่อกดทำสำเนาแอป
         const APP_STORAGE_PREFIX = 'aspire_erawan_b';
@@ -1408,6 +2539,7 @@
                 stickerRecords,
                 advanceNotices,
                 feeRecords,
+                qrDatabase,
                 feeMeta,
                 feeThreshold,
                 feeMonthlyRate,
@@ -1482,6 +2614,7 @@
                     if (Array.isArray(st.stickerRecords)) stickerRecords = st.stickerRecords;
                     if (Array.isArray(st.advanceNotices)) advanceNotices = st.advanceNotices;
                     if (Array.isArray(st.feeRecords)) feeRecords = st.feeRecords;
+                    if (Array.isArray(st.qrDatabase)) qrDatabase = st.qrDatabase;
                     if (Array.isArray(st.layouts) && st.layouts.length > 0 && !localStorage.getItem(sk('layouts_local_lock'))) {
                         layouts = st.layouts;
                     }
@@ -2163,6 +3296,7 @@
         };
 
         const BACKEND_MENU_TITLES = {
+            'qr-db': '🔲 ฐานข้อมูล QR Code',
             'list': '🚗 รายการรถจอด',
             'overstay': '🚨 เกิน 7 วัน / ล็อกล้อ',
             'sticker': '🏷️ ฐานข้อมูลสติกเกอร์',
@@ -2197,6 +3331,7 @@
             if (tabName === 'users') renderUsersTable();
             if (tabName === 'sticker') window.renderStickerList();
             if (tabName === 'fees') window.renderFeeTab();
+            window.renderQrList();
             if (tabName === 'search') window.handleSearch();
             if (tabName === 'settings' || tabName === 'layout-editor') updateLayoutUI();
         };
@@ -2890,6 +4025,7 @@
             renderAdvanceNotices();
             window.renderStickerList();
             window.renderFeeTab();
+            window.renderQrList();
             renderUsersTable();
             updateStickerDatalist();
         }
@@ -3283,6 +4419,22 @@
             window.showStickersForSelectedHouse(document.getElementById('sticker-house-select')?.value);
             showToast(`เปิดใช้งานสติกเกอร์ ${s.stickerNumber} อีกครั้ง`);
         };
+        
+        window.clearAllStickerData = async function() {
+            if (!stickerRecords.length) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: 'ล้างฐานข้อมูลสติกเกอร์ทั้งหมด',
+                message: `ต้องการลบข้อมูลสติกเกอร์ทั้งหมด (${stickerRecords.length} รายการ) ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ล้างข้อมูลสติกเกอร์ทั้งหมด', `${stickerRecords.length} รายการ`);
+            stickerRecords = [];
+            autoSaveData('clearStickerData');
+            updateMainUI();
+            showToast('ล้างข้อมูลฐานข้อมูลสติกเกอร์ทั้งหมดเรียบร้อย');
+        };
+
         window.deleteSticker = function(id) {
             stickerRecords = stickerRecords.filter(s => s.id !== id);
             autoSaveData('deleteSticker');
@@ -3544,6 +4696,7 @@
             feeMonthlyRate = Number(document.getElementById('fee-rate')?.value || 0);
             autoSaveData('updateFeeSettings');
             window.renderFeeTab();
+            window.renderQrList();
             showToast('อัปเดตตั้งค่าเกณฑ์ค่าส่วนกลางเรียบร้อย');
         };
 
@@ -3818,6 +4971,7 @@
                     if (Array.isArray(data.stickerRecords)) stickerRecords = data.stickerRecords;
                     if (Array.isArray(data.advanceNotices)) advanceNotices = data.advanceNotices;
                     if (Array.isArray(data.feeRecords)) feeRecords = data.feeRecords;
+                    if (Array.isArray(data.qrDatabase)) qrDatabase = data.qrDatabase;
                     if (Array.isArray(data.appUsers)) appUsers = data.appUsers;
                     if (Array.isArray(data.layouts) && data.layouts.length) layouts = data.layouts;
                     autoSaveData('restoreFullBackup');
@@ -4151,6 +5305,39 @@
             showToast(`ดาวน์โหลดสำเนา "${projectNameInput}" (${layoutMode === 'single' ? 'ผังเริ่มต้น 1 แผ่น' : 'ผังทั้งหมด'}) เรียบร้อย!`);
         };
 
+        // ================= ฟังก์ชันแปลง QR Code เป็นบ้านเลขที่อัตโนมัติ =================
+        window.resolveQrToHouseNumber = function(scannedText) {
+            const raw = String(scannedText || '').trim();
+            if (!raw) return '';
+
+            const norm = normalizeHouse(raw);
+            if (allHouseOptions.includes(norm)) {
+                return norm;
+            }
+
+            const foundSticker = stickerRecords.find(s => 
+                String(s.stickerNumber || '').trim().toLowerCase() === raw.toLowerCase() ||
+                String(s.plate || '').trim().toLowerCase() === raw.toLowerCase()
+            );
+            if (foundSticker && foundSticker.houseNumber && foundSticker.houseNumber !== '-') {
+                return normalizeHouse(foundSticker.houseNumber);
+            }
+
+            try {
+                if (raw.startsWith('http://') || raw.startsWith('https://')) {
+                    const url = new URL(raw);
+                    const houseParam = url.searchParams.get('house') || url.searchParams.get('room') || url.searchParams.get('h');
+                    if (houseParam) return normalizeHouse(houseParam);
+                } else if (raw.startsWith('{') && raw.endsWith('}')) {
+                    const jsonObj = JSON.parse(raw);
+                    const val = jsonObj.house || jsonObj.room || jsonObj.houseNumber;
+                    if (val) return normalizeHouse(val);
+                }
+            } catch (e) {}
+
+            return raw;
+        };
+
         window.startScan = function(targetId) {
             currentScanTargetId = targetId || 'input-house';
             const modal = document.getElementById('qr-modal');
@@ -4161,13 +5348,18 @@
                     { facingMode: 'environment' },
                     { fps: 10, qrbox: { width: 240, height: 240 } },
                     (decodedText) => {
+                        let finalValue = decodedText.trim();
+                        if (currentScanTargetId === 'input-house' || currentScanTargetId === 'sticker-house-select') {
+                            finalValue = window.resolveQrToHouseNumber(decodedText);
+                        }
+
                         const targetEl = document.getElementById(currentScanTargetId);
                         if (targetEl) {
-                            targetEl.value = decodedText.trim();
+                            targetEl.value = finalValue;
                             targetEl.dispatchEvent(new Event('input'));
                         }
                         window.stopScan();
-                        showToast(`สแกนสำเร็จ: ${decodedText}`);
+                        showToast(`สแกนและแปลงโค้ดสำเร็จ: ${finalValue}`);
                     },
                     () => {}
                 ).catch(() => {
@@ -4269,6 +5461,7 @@
                     if (Array.isArray(st.stickerRecords)) stickerRecords = st.stickerRecords;
                     if (Array.isArray(st.advanceNotices)) advanceNotices = st.advanceNotices;
                     if (Array.isArray(st.feeRecords)) feeRecords = st.feeRecords;
+                    if (Array.isArray(st.qrDatabase)) qrDatabase = st.qrDatabase;
                     if (Array.isArray(st.appUsers) && st.appUsers.length) appUsers = st.appUsers;
                     if (Array.isArray(st.layouts) && st.layouts.length) {
                         layouts = st.layouts;
@@ -4338,6 +5531,271 @@
         }
 
         window.addEventListener('DOMContentLoaded', initApp);
+    
+        // ================= ระบบฐานข้อมูล QR Code Mapping =================
+        let qrDatabase = []; // เก็บรายการ [{ id, qrKey, houseNumber, note, updatedAt }]
+
+        // ฟังก์ชันแปลง QR Code เป็นบ้านเลขที่ (อัปเดตให้ค้นหาจาก qrDatabase ด้วย)
+        window.resolveQrToHouseNumber = function(scannedText) {
+            const raw = String(scannedText || '').trim();
+            if (!raw) return '';
+
+            // 1. ค้นหาในตารางฐานข้อมูล QR Code Mapping โดยตรง
+            const foundQr = qrDatabase.find(q => String(q.qrKey || '').trim().toLowerCase() === raw.toLowerCase());
+            if (foundQr && foundQr.houseNumber && foundQr.houseNumber !== '-') {
+                return normalizeHouse(foundQr.houseNumber);
+            }
+
+            // 2. ตรวจสอบว่าตรงกับรูปแบบบ้านเลขที่มาตรฐานในระบบหรือไม่
+            const norm = normalizeHouse(raw);
+            if (allHouseOptions.includes(norm)) {
+                return norm;
+            }
+
+            // 3. ค้นหาจากฐานข้อมูลสติกเกอร์
+            const foundSticker = stickerRecords.find(s => 
+                String(s.stickerNumber || '').trim().toLowerCase() === raw.toLowerCase() ||
+                String(s.plate || '').trim().toLowerCase() === raw.toLowerCase()
+            );
+            if (foundSticker && foundSticker.houseNumber && foundSticker.houseNumber !== '-') {
+                return normalizeHouse(foundSticker.houseNumber);
+            }
+
+            // 4. รองรับ URL หรือ JSON
+            try {
+                if (raw.startsWith('http://') || raw.startsWith('https://')) {
+                    const url = new URL(raw);
+                    const houseParam = url.searchParams.get('house') || url.searchParams.get('room') || url.searchParams.get('h');
+                    if (houseParam) return normalizeHouse(houseParam);
+                } else if (raw.startsWith('{') && raw.endsWith('}')) {
+                    const jsonObj = JSON.parse(raw);
+                    const val = jsonObj.house || jsonObj.room || jsonObj.houseNumber;
+                    if (val) return normalizeHouse(val);
+                }
+            } catch (e) {}
+
+            return raw;
+        };
+
+        window.handleSaveSingleQr = function(e) {
+            e.preventDefault();
+            const editId = document.getElementById('qr-edit-id').value;
+            const qrKey = document.getElementById('qr-input-key').value.trim();
+            const house = normalizeHouse(document.getElementById('qr-input-house').value);
+            const note = document.getElementById('qr-input-note').value.trim() || '';
+
+            if (!qrKey || !house || house === '-') {
+                return window.customDialog({ type: 'alert', title: 'ข้อมูลไม่ครบ', message: 'กรุณากรอกรหัส QR Code และบ้านเลขที่ให้ถูกต้อง' });
+            }
+
+            captureStateSnapshot('บันทึกข้อมูล QR Code Mapping', qrKey);
+
+            const existingIdx = editId
+                ? qrDatabase.findIndex(q => q.id === editId)
+                : qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+
+            const record = {
+                id: existingIdx !== -1 ? qrDatabase[existingIdx].id : ('qr-' + Date.now()),
+                qrKey,
+                houseNumber: house,
+                note,
+                updatedAt: new Date().toISOString()
+            };
+
+            if (existingIdx !== -1) {
+                qrDatabase[existingIdx] = record;
+            } else {
+                qrDatabase.unshift(record);
+            }
+
+            window.resetQrForm();
+            autoSaveData('saveQrRecord');
+            window.renderQrList();
+            showToast(`บันทึก QR Code "${qrKey}" เรียบร้อย!`);
+        };
+
+        window.editQrRecord = function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            document.getElementById('qr-edit-id').value = q.id;
+            document.getElementById('qr-input-key').value = q.qrKey || '';
+            document.getElementById('qr-input-house').value = q.houseNumber || '';
+            document.getElementById('qr-input-note').value = q.note || '';
+            document.getElementById('qr-form-title').innerHTML = `<span>✏️</span> แก้ไขข้อมูล QR Code: ${esc(q.qrKey)}`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> อัปเดตข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.remove('hidden');
+            document.getElementById('qr-input-key').focus();
+        };
+
+        window.resetQrForm = function() {
+            document.getElementById('qr-edit-id').value = '';
+            document.getElementById('qr-input-key').value = '';
+            document.getElementById('qr-input-house').value = '';
+            document.getElementById('qr-input-note').value = '';
+            document.getElementById('qr-form-title').innerHTML = `<span>➕</span> เพิ่ม / ผูกรหัส QR Code กับบ้านเลขที่`;
+            document.getElementById('qr-submit-btn').innerHTML = `<span>💾</span> บันทึกข้อมูล QR Code`;
+            document.getElementById('qr-cancel-edit-btn').classList.add('hidden');
+        };
+
+        window.deleteQrRecord = async function(id) {
+            const q = qrDatabase.find(item => item.id === id);
+            if (!q) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: '🗑️ ยืนยันการลบข้อมูล QR',
+                message: `ต้องการลบการเชื่อมโยง QR Key "${q.qrKey}" ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ลบข้อมูล QR Code Mapping', q.qrKey);
+            qrDatabase = qrDatabase.filter(item => item.id !== id);
+            autoSaveData('deleteQrRecord');
+            window.renderQrList();
+            showToast('ลบรายการ QR เรียบร้อย');
+        };
+
+        window.clearAllQrData = async function() {
+            if (!qrDatabase.length) return;
+            const ok = await window.customDialog({
+                type: 'confirm',
+                title: 'ล้างฐานข้อมูล QR Code ทั้งหมด',
+                message: `ต้องการลบข้อมูล QR Mapping ทั้งหมด (${qrDatabase.length} รายการ) ใช่หรือไม่?`
+            });
+            if (!ok) return;
+            captureStateSnapshot('ล้างข้อมูล QR ทั้งหมด', `${qrDatabase.length} รายการ`);
+            qrDatabase = [];
+            autoSaveData('clearQrData');
+            window.renderQrList();
+            showToast('ล้างข้อมูลฐานข้อมูล QR ทั้งหมดเรียบร้อย');
+        };
+
+        window.downloadQrTemplate = function() {
+            const csv = csvRow(['qrKey', 'houseNumber', 'note']) +
+                        csvRow(['QR-62-0001', '62/0001', 'ป้ายหน้าห้องชุด']) +
+                        csvRow(['QR-62-0002', '62/0002', 'สติกเกอร์จอดรถ']);
+            downloadCSV(csv, 'qr-mapping-template.csv');
+        };
+
+        window.exportQrCSV = function() {
+            if (!qrDatabase.length) {
+                return window.customDialog({ type: 'alert', title: 'ไม่มีข้อมูล', message: 'ยังไม่มีข้อมูลในฐานข้อมูล QR Code สำหรับ Export' });
+            }
+            let csv = csvRow(['รหัส QR Code / Key', 'บ้านเลขที่', 'หมายเหตุ', 'วันที่อัปเดต']);
+            qrDatabase.forEach(q => {
+                csv += csvRow([q.qrKey, q.houseNumber, q.note || '', q.updatedAt || '']);
+            });
+            downloadCSV(csv, `qr-database-${todayLocal()}.csv`);
+        };
+
+        window.importQrFile = function(e) {
+            const file = e.target.files?.[0];
+            if (!file) return;
+
+            const processQrRows = (rows) => {
+                let count = 0;
+                captureStateSnapshot('นำเข้าไฟล์ฐานข้อมูล QR Code', `${rows.length} รายการ`);
+                rows.forEach(r => {
+                    if (!r || typeof r !== 'object') return;
+                    const keyRaw = r.qrKey ?? r.key ?? r['รหัส QR'] ?? r['รหัส QR Code'] ?? Object.values(r)[0];
+                    const qrKey = String(keyRaw || '').trim();
+                    if (!qrKey || qrKey === 'qrKey' || qrKey.toLowerCase() === 'qrcode') return;
+
+                    const houseRaw = r.houseNumber ?? r['บ้านเลขที่'] ?? r['ห้อง'] ?? Object.values(r)[1];
+                    const house = normalizeHouse(houseRaw);
+                    const note = String(r.note ?? r['หมายเหตุ'] ?? '').trim();
+
+                    const idx = qrDatabase.findIndex(q => String(q.qrKey).toLowerCase() === qrKey.toLowerCase());
+                    const obj = {
+                        id: idx !== -1 ? qrDatabase[idx].id : ('qr-' + Date.now() + '-' + count),
+                        qrKey,
+                        houseNumber: house,
+                        note,
+                        updatedAt: new Date().toISOString()
+                    };
+
+                    if (idx !== -1) qrDatabase[idx] = obj;
+                    else qrDatabase.unshift(obj);
+                    count++;
+                });
+
+                autoSaveData('importQrDatabase');
+                window.renderQrList();
+                showToast(`นำเข้าฐานข้อมูล QR Code สำเร็จ ${count} รายการ!`);
+            };
+
+            const fileName = (file.name || '').toLowerCase();
+            const reader = new FileReader();
+
+            if (fileName.endsWith('.json')) {
+                reader.onload = function(evt) {
+                    try {
+                        const parsed = JSON.parse(evt.target.result);
+                        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.qrDatabase) ? parsed.qrDatabase : []);
+                        processQrRows(list);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ JSON ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsText(file, 'utf-8');
+            } else {
+                reader.onload = function(evt) {
+                    try {
+                        if (typeof XLSX === 'undefined') throw new Error('XLSX missing');
+                        const data = new Uint8Array(evt.target.result);
+                        const wb = XLSX.read(data, { type: 'array' });
+                        const ws = wb.Sheets[wb.SheetNames[0]];
+                        const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+                        processQrRows(rows);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ Excel/CSV ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        };
+
+        window.renderQrList = function() {
+            const listEl = document.getElementById('qr-list-container');
+            const infoEl = document.getElementById('qr-list-info');
+            const countBadge = document.getElementById('nav-count-qr-db');
+            if (countBadge) countBadge.innerText = qrDatabase.length;
+            if (!listEl || !infoEl) return;
+
+            if (!qrDatabase.length) {
+                infoEl.innerText = 'แสดง 0 รายการ';
+                listEl.innerHTML = `<div class="text-center text-gray-400 text-xs py-6">ยังไม่มีข้อมูลในฐานข้อมูล QR Code</div>`;
+                return;
+            }
+
+            const q = (document.getElementById('qr-search')?.value || '').trim().toLowerCase();
+            const filtered = qrDatabase.filter(item =>
+                !q ||
+                String(item.qrKey).toLowerCase().includes(q) ||
+                String(item.houseNumber).toLowerCase().includes(q) ||
+                String(item.note || '').toLowerCase().includes(q)
+            );
+
+            infoEl.innerText = `แสดง ${filtered.length} รายการ`;
+            listEl.innerHTML = filtered.map(item => `
+                <div class="p-3 bg-teal-50/50 border border-teal-200 rounded-xl flex flex-wrap justify-between items-center gap-2 text-xs hover:bg-teal-50 transition">
+                    <div class="space-y-0.5">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="font-extrabold text-teal-950 text-sm">🔲 ${esc(item.qrKey)}</span>
+                            <span class="bg-teal-200/80 text-teal-900 px-2 py-0.5 rounded-full font-bold text-[11px]">🏠 ${esc(item.houseNumber)}</span>
+                            ${item.note ? `<span class="text-gray-600 text-[11px]">• ${esc(item.note)}</span>` : ''}
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <button type="button" onclick="window.editQrRecord('${item.id}')" class="bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">✏️ แก้ไข</button>
+                        <button type="button" onclick="window.deleteQrRecord('${item.id}')" class="bg-red-100 hover:bg-red-200 text-red-700 font-bold px-2.5 py-1.5 rounded-lg text-[11px] transition">🗑️ ลบ</button>
+                    </div>
+                </div>
+            `).join('');
+        };
+
     </script>
 </body>
 </html>
