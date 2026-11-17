@@ -4776,18 +4776,130 @@
             }
         };
 
-        window.downloadFeeTemplate = function() {
-            const csv = csvRow(['บ้านเลขที่', 'จำนวนเดือน', 'ยอดค้าง', 'งวดที่ค้าง', 'หมายเหตุ']) +
-                        csvRow(['62/0001', '6', '7200', 'ม.ค. 68 - มิ.ย. 68', 'แจ้งเตือนครั้งที่ 1']);
-            downloadCSV(csv, 'fee-template.csv');
+                window.downloadFeeTemplate = function() {
+            const csv = csvRow(['ห้องชุดเลขที่', 'บ้านเลขที่', 'ก.ค. 69 - ธ.ค. 69', 'ม.ค. 69 - มิ.ย. 69', 'ก.ค. 68 - ธ.ค. 68', 'รอบเก่า', 'ยอดรวม', 'หมายเหตุ']) +
+                        csvRow(['S05C05', '62/0005', '7025.04', '7025.04', '7025.04', '7025.04', '42150.24', 'ผ่อนชำระ']);
+            downloadCSV(csv, 'common-fee-template.csv');
         };
 
         window.exportFeeCSV = function() {
-            let csv = csvRow(['บ้านเลขที่', 'จำนวนเดือนที่ค้าง', 'ยอดค้างชำระ (บาท)', 'งวดที่ค้าง', 'หมายเหตุ']);
+            if (!feeRecords.length) {
+                return window.customDialog({ type: 'alert', title: 'ไม่มีข้อมูล', message: 'ยังไม่มีข้อมูลค่าส่วนกลางสำหรับ Export' });
+            }
+            let headers = ['ห้องชุดเลขที่', 'บ้านเลขที่', 'งวดที่ค้าง / รายละเอียด', 'ยอดค้างชำระ (บาท)', 'ยอดรวม', 'หมายเหตุ'];
+            let csv = csvRow(headers);
             feeRecords.forEach(f => {
-                csv += csvRow([f.houseNumber, f.months || 0, f.amount || 0, f.period || '-', f.note || '']);
+                csv += csvRow([f.roomNo || '-', f.houseNumber || '-', f.period || '-', f.amount || 0, f.totalAmount || f.amount || 0, f.note || '']);
             });
             downloadCSV(csv, `common-fees-${todayLocal()}.csv`);
+        };
+
+        window.importFeeFile = function(e) {
+            const file = e.target.files?.[0];
+            if (!file) return;
+
+            const processFeeRows = (rows) => {
+                let count = 0;
+                captureStateSnapshot('นำเข้าไฟล์ค่าส่วนกลาง', `${rows.length} รายการ`);
+                
+                rows.forEach(r => {
+                    if (!r || typeof r !== 'object') return;
+                    
+                    // ค้นหาบ้านเลขที่
+                    let houseRaw = '';
+                    let roomNo = '';
+                    let totalAmt = 0;
+                    let periodSummary = [];
+                    let note = '';
+
+                    for (let key in r) {
+                        let kLower = String(key).trim().toLowerCase();
+                        let val = r[key];
+                        if (kLower.includes('บ้านเลขที่') || kLower.includes('house')) {
+                            houseRaw = val;
+                        } else if (kLower.includes('ห้องชุด') || kLower.includes('ห้อง') || kLower.includes('room') || kLower.includes('unit')) {
+                            roomNo = val;
+                        } else if (kLower.includes('หมายเหตุ') || kLower.includes('note')) {
+                            note = String(val || '');
+                        } else if (kLower.includes('ยอดรวม') || kLower.includes('total')) {
+                            totalAmt = Number(String(val || 0).replace(/,/g, '')) || 0;
+                        } else {
+                            // ตรวจสอบว่าเป็นคอลัมน์งวดหรือไม่ (เช่น มีตัวเลข, มีเครื่องหมาย -, เดือนไทย ฯลฯ)
+                            let numVal = Number(String(val || 0).replace(/,/g, ''));
+                            if (!isNaN(numVal) && numVal > 0) {
+                                periodSummary.push(`${key}: ${Number(numVal).toLocaleString()}฿`);
+                                totalAmt += numVal;
+                            }
+                        }
+                    }
+
+                    // Fallback ถ้าไม่ได้ระบุบ้านเลขที่แต่มีค่าในคอลัมน์แรกๆ
+                    if (!houseRaw) {
+                        houseRaw = r['บ้านเลขที่'] || r['House'] || Object.values(r)[1] || Object.values(r)[0];
+                    }
+
+                    const house = normalizeHouse(houseRaw);
+                    if (!house || house === '-' || house === 'บ้านเลขที่') return;
+
+                    const periodText = periodSummary.length > 0 ? periodSummary.join(' | ') : (r.period || r['งวดที่ค้าง'] || 'ค้างชำระตามงวด');
+                    const amount = totalAmt > 0 ? totalAmt : Number(String(r.amount || r['ยอดค้าง'] || r['จำนวนเงิน'] || 0).replace(/,/g, '')) || 0;
+
+                    const idx = feeRecords.findIndex(f => normalizeHouse(f.houseNumber) === house);
+                    const obj = {
+                        id: idx !== -1 ? feeRecords[idx].id : ('fee-' + Date.now() + '-' + count),
+                        roomNo: String(roomNo || r['ห้องชุดเลขที่'] || '-').trim(),
+                        houseNumber: house,
+                        months: Number(r.months || periodSummary.length || feeThreshold || 6),
+                        amount: amount,
+                        totalAmount: amount,
+                        period: periodText,
+                        note: note || String(r.note || ''),
+                        updatedAt: new Date().toISOString()
+                    };
+
+                    if (idx !== -1) feeRecords[idx] = obj;
+                    else feeRecords.push(obj);
+                    count++;
+                });
+
+                autoSaveData('importFees');
+                updateMainUI();
+                showToast(`นำเข้าข้อมูลค่าส่วนกลางสำเร็จ ${count} ห้อง (รองรับตารางตามงวด)!`);
+            };
+
+            const fileName = (file.name || '').toLowerCase();
+            const reader = new FileReader();
+
+            if (fileName.endsWith('.json')) {
+                reader.onload = function(evt) {
+                    try {
+                        const parsed = JSON.parse(evt.target.result);
+                        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.feeRecords) ? parsed.feeRecords : []);
+                        processFeeRows(list);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ JSON ได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsText(file, 'utf-8');
+            } else {
+                reader.onload = function(evt) {
+                    try {
+                        if (typeof XLSX === 'undefined') throw new Error('XLSX missing');
+                        const data = new Uint8Array(evt.target.result);
+                        const wb = XLSX.read(data, { type: 'array' });
+                        const ws = wb.Sheets[wb.SheetNames[0]];
+                        const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+                        processFeeRows(rows);
+                    } catch (err) {
+                        window.customDialog({ type: 'alert', title: 'ไฟล์ไม่ถูกต้อง', message: 'ไม่สามารถอ่านไฟล์ Excel/CSV ตามรูปแบบตารางได้' });
+                    } finally {
+                        e.target.value = '';
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            }
         };
 
         window.renderFeeTab = function() {
@@ -4816,13 +4928,14 @@
             `;
             if (!feeRecords.length) {
                 document.getElementById('fee-list-info').innerText = 'แสดง 0 รายการ';
-                listEl.innerHTML = `<div class="text-center text-gray-400 text-xs py-6">ไม่มีข้อมูลค้างชำระค่าส่วนกลาง</div>`;
+                listEl.innerHTML = `<div class="text-center text-gray-400 text-xs py-6">ไม่มีข้อมูลค้างชำระค่าส่วนกลาง (รองรับตารางแยกตามงวด)</div>`;
                 return;
             }
             const q = (document.getElementById('fee-search')?.value || '').trim().toLowerCase();
             const filtered = feeRecords.filter(f =>
                 !q ||
                 String(f.houseNumber).toLowerCase().includes(q) ||
+                String(f.roomNo || '').toLowerCase().includes(q) ||
                 String(f.period || '').toLowerCase().includes(q) ||
                 String(f.note || '').toLowerCase().includes(q)
             );
@@ -4833,12 +4946,12 @@
                     <div class="p-3.5 bg-orange-50/50 border border-orange-200 rounded-xl flex flex-wrap justify-between items-center gap-2 text-xs hover:bg-orange-50 transition">
                         <div class="space-y-0.5">
                             <div class="flex items-center gap-2 flex-wrap">
-                                <span class="font-extrabold text-orange-950 text-sm">🏠 ห้อง ${esc(f.houseNumber)}</span>
-                                ${f.months ? `<span class="bg-orange-200/80 text-orange-900 px-2 py-0.5 rounded-full font-bold text-[10px]">ค้าง ${esc(f.months)} เดือน</span>` : ''}
+                                <span class="font-extrabold text-orange-950 text-sm">🏠 ห้อง ${esc(f.houseNumber)} ${f.roomNo && f.roomNo !== '-' ? `(${esc(f.roomNo)})` : ''}</span>
                                 <span class="font-extrabold text-red-700 text-sm">${Number(f.amount || 0).toLocaleString('th-TH', { minimumFractionDigits: 2 })} บาท</span>
                                 ${parkedCars.length ? `<span class="bg-red-600 text-white px-2 py-0.5 rounded-full font-bold text-[10px]">🚗 จอดอยู่: ${parkedCars.map(c => `${c.spot}(${c.plate})`).join(', ')}</span>` : ''}
                             </div>
-                            <p class="text-[11px] text-gray-600">งวดที่ค้าง: <b>${esc(f.period || '-')}</b> ${f.note ? `• หมายเหตุ: ${esc(f.note)}` : ''}</p>
+                            <p class="text-[11px] text-gray-700 mt-1 bg-white p-2 rounded-lg border border-orange-100"><b>งวด / รายละเอียด:</b> ${esc(f.period || '-')}</p>
+                            ${f.note ? `<p class="text-[10px] text-gray-500">หมายเหตุ: ${esc(f.note)}</p>` : ''}
                         </div>
                         <div class="flex items-center gap-1.5 flex-wrap">
                             <button type="button" onclick="window.markFeePaidAndRemove('${f.id}')" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-2.5 py-1.5 rounded-lg text-[11px] shadow-sm transition flex items-center gap-1">
@@ -4855,6 +4968,7 @@
                 `;
             }).join('');
         };
+
 
         window.setDashRange = function(r) {
             dashRange = r;
